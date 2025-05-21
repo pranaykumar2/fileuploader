@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -38,6 +39,7 @@ func main() {
 	appHash := flag.String("api-hash", "", "Telegram API Hash")
 	phone := flag.String("phone", "", "Phone number in international format")
 	filePath := flag.String("file", "", "Path to the file to upload")
+	fileURL := flag.String("url", "", "URL of the file to download and upload")
 	targetID := flag.String("target", "me", "Target username or chat ID (default: 'me' for Saved Messages)")
 	flag.Parse()
 
@@ -45,11 +47,23 @@ func main() {
 	if *appID == 0 || *appHash == "" {
 		log.Fatal("API ID and API Hash are required")
 	}
-	if *filePath == "" {
-		log.Fatal("File path is required")
+	if *filePath == "" && *fileURL == "" {
+		log.Fatal("Either file path or URL is required")
 	}
 	if *phone == "" {
 		log.Fatal("Phone number is required")
+	}
+
+	// If URL is provided, download the file
+	finalFilePath := *filePath
+	if *fileURL != "" {
+		fmt.Println("Downloading file from URL...")
+		tmpPath, err := downloadFileFromURL(*fileURL)
+		if err != nil {
+			log.Fatalf("Failed to download file: %v", err)
+		}
+		finalFilePath = tmpPath
+		defer os.Remove(tmpPath) // Clean up temp file after upload
 	}
 
 	// Create config
@@ -57,7 +71,7 @@ func main() {
 		AppID:    *appID,
 		AppHash:  *appHash,
 		Phone:    *phone,
-		FilePath: *filePath,
+		FilePath: finalFilePath,
 		TargetID: *targetID,
 	}
 
@@ -65,6 +79,55 @@ func main() {
 	if err := run(config); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// downloadFileFromURL downloads a file from the given URL and returns the local file path
+func downloadFileFromURL(url string) (string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	// Try to get filename from URL or Content-Disposition
+	filename := filepath.Base(resp.Request.URL.Path)
+	if filename == "" || filename == "/" {
+		filename = "downloaded_file"
+	}
+
+	tmpFile, err := os.CreateTemp("", filename)
+	if err != nil {
+		return "", err
+	}
+	defer tmpFile.Close()
+
+	// Create progress bar for download
+	fmt.Printf("Downloading %s...\n", filename)
+	bar := progressbar.NewOptions64(
+		resp.ContentLength,
+		progressbar.OptionSetDescription("Downloading"),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionSetWidth(30),
+		progressbar.OptionThrottle(100*time.Millisecond),
+		progressbar.OptionShowCount(),
+		progressbar.OptionOnCompletion(func() { fmt.Println() }),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetElapsedTime(true),
+		progressbar.OptionSetPredictTime(true),
+		progressbar.OptionFullWidth(),
+	)
+
+	// Copy the body to the file with progress bar
+	_, err = io.Copy(io.MultiWriter(tmpFile, bar), resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return tmpFile.Name(), nil
 }
 
 func run(config *Config) error {
